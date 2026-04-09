@@ -6,18 +6,6 @@ A [FastMCP](https://github.com/jlowin/fastmcp) server that wraps the unofficial 
 
 > **Disclaimer.** This project is for educational and personal use only. It automates access to Flink's private, undocumented API, which likely violates their Terms of Service. Use at your own risk. The author is not affiliated with Flink and takes no responsibility for account suspension, order issues, or any other consequences of use.
 
-## Legal & ToS notice
-
-This project reverse-engineers a private, undocumented API by decompiling the Flink Android APK. Before using it, be aware:
-
-- **Likely against Flink's Terms of Service.** Automated API access, APK decompilation, and scripted ordering are almost certainly prohibited by Flink's ToS. Your account could be suspended if detected.
-- **For personal and research use only.** Do not use this to scrape prices at scale, automate bulk orders, resell access, or do anything commercial. The intended use case is: you, your groceries, your account.
-- **No warranty.** Orders placed via this tool are real orders charged to your real payment method. Always review your cart before calling `place_order()`. The author takes no responsibility for duplicate orders, wrong deliveries, or payment issues.
-- **The embedded credentials belong to Flink.** The Firebase API key and Google OAuth client ID in the source code were extracted from Flink's own APK. They are not personal credentials, but they are Flink's property. Flink may rotate them at any time, which would break authentication.
-- **Reverse engineering legality varies by jurisdiction.** In the EU, decompilation for interoperability purposes is generally permitted under the Software Directive (2009/24/EC). In other regions, check your local laws before proceeding.
-
-TL;DR: this is a personal hobby project. Use it for your own groceries, don't be a jerk about it, and don't blame anyone but yourself if something goes wrong.
-
 ## Status
 
 **Working end-to-end.** A real order was placed on 2026-04-04. The full flow — auth, hub selection, product discovery, cart creation, payment, and order placement — is automated. The only manual step per order is a PayPal browser redirect (~5 seconds).
@@ -223,3 +211,15 @@ Each tool call shows the full response immediately. API errors (wrong field name
 ## API documentation
 
 See `openapi.yaml` — a reverse-engineered OpenAPI 3.0 spec covering all discovered endpoints across auth, hub locator, product discovery, cart, payment methods and checkout. Includes confirmed request/response shapes, field names from APK `@Json` annotations, and notes on the working PayPal checkout flow.
+
+## Legal & ToS notice
+
+This project reverse-engineers a private, undocumented API by decompiling the Flink Android APK. Before using it, be aware:
+
+- **Likely against Flink's Terms of Service.** Automated API access, APK decompilation, and scripted ordering are almost certainly prohibited by Flink's ToS. Your account could be suspended if detected.
+- **For personal and research use only.** Do not use this to scrape prices at scale, automate bulk orders, resell access, or do anything commercial. The intended use case is: you, your groceries, your account.
+- **No warranty.** Orders placed via this tool are real orders charged to your real payment method. Always review your cart before calling `place_order()`. The author takes no responsibility for duplicate orders, wrong deliveries, or payment issues.
+- **The embedded credentials belong to Flink.** The Firebase API key and Google OAuth client ID in the source code were extracted from Flink's own APK. They are not personal credentials, but they are Flink's property. Flink may rotate them at any time, which would break authentication.
+- **Reverse engineering legality varies by jurisdiction.** In the EU, decompilation for interoperability purposes is generally permitted under the Software Directive (2009/24/EC). In other regions, check your local laws before proceeding.
+
+TL;DR: this is a personal hobby project. Use it for your own groceries, don't be a jerk about it, and don't blame anyone but yourself if something goes wrong.
