@@ -1,0 +1,2219 @@
+openapi: 3.0.3
+
+info:
+  title: Flink Consumer API
+  description: >
+    Reverse-engineered OpenAPI specification for the Flink grocery delivery
+    consumer-facing backend. Field names are derived from @Json Moshi annotations
+    in the decompiled APK (version 2026.13.0). Nullability is taken from
+    @Nullable/@NotNull annotations on the corresponding Kotlin DTO constructors.
+
+    **Authentication bootstrap pattern:**
+    The sign-up endpoint requires no auth. The flow for a phone-only account is:
+      1. POST /sign-up with throwaway credentials → returns Firebase custom token
+         (`access_token`).
+      2. Exchange custom token for Firebase ID token via Firebase Identity Toolkit
+         (`signInWithCustomToken`).
+      3. Use ID token as Bearer for all subsequent calls.
+      4. POST /send-otp to trigger SMS.
+      5. PUT /me with ActionDto (phoneNumber + verificationCode) to link phone.
+         If the phone is already linked to another account, a 409 is returned;
+         retry with `override: true` in the action body to force re-link.
+  version: "2026.13.0"
+  contact:
+    name: Flink
+    url: https://www.goflink.com
+
+servers:
+  - url: https://api.goflink.com
+    description: Production
+
+# ---------------------------------------------------------------------------
+# Security schemes
+# ---------------------------------------------------------------------------
+
+security:
+  - BearerAuth: []
+
+components:
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Firebase ID token
+      description: >
+        Firebase ID token obtained either via email sign-up + custom-token
+        exchange, or via Google OAuth → Firebase Identity Provider.
+        Tokens expire after ~1 hour; use the Firebase refresh-token endpoint
+        (`https://securetoken.googleapis.com/v1/token`) to obtain a fresh
+        ID token.
+
+  # -------------------------------------------------------------------------
+  # Reusable header parameters
+  # -------------------------------------------------------------------------
+
+  parameters:
+    HubHeader:
+      name: hub
+      in: header
+      required: true
+      description: Numeric hub identifier (e.g. "1234").
+      schema:
+        type: string
+      example: "1234"
+
+    HubSlugHeader:
+      name: hub-slug
+      in: header
+      required: true
+      description: Human-readable hub slug (e.g. "berlin-mitte-1").
+      schema:
+        type: string
+      example: "berlin-mitte-1"
+
+    LocaleHeader:
+      name: locale
+      in: header
+      required: true
+      description: BCP-47 locale tag. Flink typically expects "de-DE".
+      schema:
+        type: string
+        default: "de-DE"
+      example: "de-DE"
+
+    UserAgentHeader:
+      name: User-Agent
+      in: header
+      required: true
+      schema:
+        type: string
+        default: "Flink/2026.13.0 (Android)"
+      example: "Flink/2026.13.0 (Android)"
+
+    ClientVersionHeader:
+      name: Client-Version
+      in: header
+      required: true
+      schema:
+        type: string
+        default: "Android 2026.13.0"
+      example: "Android 2026.13.0"
+
+    CartIdPath:
+      name: cartId
+      in: path
+      required: true
+      description: Cart UUID returned when the cart was created.
+      schema:
+        type: string
+        format: uuid
+      example: "550e8400-e29b-41d4-a716-446655440000"
+
+  # -------------------------------------------------------------------------
+  # Reusable schemas
+  # -------------------------------------------------------------------------
+
+  schemas:
+
+    # ---- Address -----------------------------------------------------------
+
+    CartAddressDto:
+      type: object
+      description: >
+        Shipping or billing address. Field names from @Json annotations in
+        CartAddressDto.kt. address_id and company_name and street_address_2 are
+        @Nullable; all other string fields are @NotNull.
+      required:
+        - tag
+        - city
+        - country
+        - first_name
+        - last_name
+        - phone
+        - postal_code
+        - street_address_1
+        - house_number
+        - floor_number
+        - name_on_doorbell
+        - building_type
+        - building_location
+      properties:
+        address_id:
+          type: string
+          nullable: true
+          description: Optional persistent address ID for saved addresses.
+          example: null
+        tag:
+          type: string
+          description: >
+            Label for the address. Observed values: "home", "work", "other".
+          example: "home"
+        city:
+          type: string
+          example: "Berlin"
+        company_name:
+          type: string
+          nullable: true
+          example: null
+        country:
+          type: string
+          description: ISO 3166-1 alpha-2 country code.
+          example: "DE"
+        first_name:
+          type: string
+          example: "Max"
+        last_name:
+          type: string
+          example: "Mustermann"
+        phone:
+          type: string
+          description: Full international phone number including country code.
+          example: "+4915112345678"
+        postal_code:
+          type: string
+          example: "10115"
+        street_address_1:
+          type: string
+          example: "Unter den Linden"
+        street_address_2:
+          type: string
+          nullable: true
+          description: Additional address line (apartment, suite, etc.).
+          example: null
+        house_number:
+          type: string
+          example: "1"
+        floor_number:
+          type: string
+          description: Floor / storey. Empty string if not applicable.
+          example: "2"
+        name_on_doorbell:
+          type: string
+          description: Doorbell label for rider. Empty string if not applicable.
+          example: "Mustermann"
+        building_type:
+          type: string
+          description: >
+            Building access type. Observed values: "", "house", "apartment".
+          example: ""
+        building_location:
+          type: string
+          description: Free-text building location hint for the rider.
+          example: ""
+
+    # ---- Coordinates -------------------------------------------------------
+
+    CartCoordinateDto:
+      type: object
+      description: WGS-84 coordinate pair for the delivery drop-off point.
+      required:
+        - latitude
+        - longitude
+      properties:
+        latitude:
+          type: number
+          format: double
+          example: 52.5089
+        longitude:
+          type: number
+          format: double
+          example: 13.4523
+
+    # ---- Cart line ---------------------------------------------------------
+
+    CartLine:
+      type: object
+      description: >
+        A single product line in a cart. Field names from
+        SimplifiedProductWrapperDto.kt (@Json "product_sku", "quantity").
+      required:
+        - product_sku
+        - quantity
+      properties:
+        product_sku:
+          type: string
+          description: Flink product SKU.
+          example: "prod-de-0012345"
+        quantity:
+          type: integer
+          format: int64
+          minimum: 1
+          example: 2
+
+    # ---- Time slot (cart update / prepare-cart) ----------------------------
+
+    TimeSlotDto:
+      type: object
+      description: >
+        Scheduled delivery time slot. Field names from TimeSlotDto.kt.
+        Note: the @Json annotation for the second field is "type" (not
+        "delivery_type" — the Kotlin property name differs from the wire name).
+      required:
+        - id
+        - type
+        - start
+        - end
+      properties:
+        id:
+          type: string
+          description: Opaque time-slot identifier.
+          example: "slot-2026-04-04T10:00:00Z"
+        type:
+          type: string
+          description: Delivery type. Observed values: "EXPRESS", "SCHEDULED".
+          example: "EXPRESS"
+        start:
+          type: string
+          format: date-time
+          example: "2026-04-04T10:00:00Z"
+        end:
+          type: string
+          format: date-time
+          example: "2026-04-04T10:30:00Z"
+
+    # ---- Selected time slot (checkout delivery schedule) -------------------
+
+    SelectedTimeSlotDto:
+      type: object
+      description: >
+        Currently selected time slot returned in DeliveryScheduleResponseDto.
+        Field names from SelectedTimeSlotDto.kt.
+      required:
+        - id
+        - type
+        - start
+        - end
+      properties:
+        id:
+          type: string
+          example: "slot-2026-04-04T10:00:00Z"
+        type:
+          type: string
+          example: "EXPRESS"
+        start:
+          type: string
+          format: date-time
+          example: "2026-04-04T10:00:00Z"
+        end:
+          type: string
+          format: date-time
+          example: "2026-04-04T10:30:00Z"
+
+    # ---- Create cart request -----------------------------------------------
+
+    CreateCartRequest:
+      type: object
+      description: >
+        Request body for POST /cart/v3/cart. Field names from
+        CreateCartRequestDto.kt. All fields except notes are @NotNull.
+      required:
+        - shipping_address
+        - billing_address
+        - delivery_coordinates
+        - lines
+      properties:
+        shipping_address:
+          $ref: '#/components/schemas/CartAddressDto'
+        billing_address:
+          $ref: '#/components/schemas/CartAddressDto'
+        delivery_coordinates:
+          $ref: '#/components/schemas/CartCoordinateDto'
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartLine'
+          minItems: 1
+        notes:
+          type: string
+          nullable: true
+          description: Optional delivery note for the rider.
+          example: null
+
+    # ---- Update cart request -----------------------------------------------
+
+    UpdateCartRequest:
+      type: object
+      description: >
+        Request body for PUT /cart/v3/cart/{cartId}. Field names from
+        UpdateCartRequestDto.kt. shipping_address, billing_address, lines and
+        updated_slot are @Nullable; delivery_coordinates and
+        promised_delivery_time are @NotNull.
+      required:
+        - delivery_coordinates
+        - promised_delivery_time
+      properties:
+        shipping_address:
+          $ref: '#/components/schemas/CartAddressDto'
+          nullable: true
+        billing_address:
+          $ref: '#/components/schemas/CartAddressDto'
+          nullable: true
+        delivery_coordinates:
+          $ref: '#/components/schemas/CartCoordinateDto'
+        lines:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/CartLine'
+          description: >
+            Full replacement list of cart lines. To remove an item omit it
+            from this array. Set to null to leave lines unchanged.
+        promised_delivery_time:
+          type: integer
+          description: >
+            Promised delivery time in minutes (PDT). Pass 0 to use the
+            hub's default. Observed in server.py as literal 0.
+          example: 0
+        updated_slot:
+          $ref: '#/components/schemas/TimeSlotDto'
+          nullable: true
+
+    # ---- Simplified cart response ------------------------------------------
+
+    SimplifiedCartResponse:
+      type: object
+      description: >
+        Lightweight cart summary returned by POST /cart/v3/cart.
+        Exact response shape inferred from server.py usage
+        (fields: id, lines, delivery_coordinates, status).
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        status:
+          type: string
+          description: Cart lifecycle status.
+          example: "OPEN"
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartLine'
+        delivery_coordinates:
+          $ref: '#/components/schemas/CartCoordinateDto'
+
+    # ---- Full cart response ------------------------------------------------
+
+    CartResponse:
+      type: object
+      description: >
+        Full cart object returned by GET/PUT /cart/v3/cart/{cartId}.
+        Envelope shape inferred from server.py field accesses
+        (cart.get("lines"), cart.get("delivery_coordinates")).
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        status:
+          type: string
+          example: "OPEN"
+        lines:
+          type: array
+          items:
+            $ref: '#/components/schemas/CartLine'
+        delivery_coordinates:
+          $ref: '#/components/schemas/CartCoordinateDto'
+        billing_address:
+          $ref: '#/components/schemas/CartAddressDto'
+        shipping_address:
+          $ref: '#/components/schemas/CartAddressDto'
+        pricing:
+          type: object
+          description: Cart total, fees and discounts. Shape varies by hub.
+          additionalProperties: true
+        vouchers:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    # ---- Checkout request --------------------------------------------------
+
+    CheckoutCartRequest:
+      type: object
+      description: >
+        Request body for POST /cart/v1/cart/{cartId}/checkout.
+        Field names from CheckoutCartRequestDto.kt:
+          - `amount` maps to @Json("amount") — cart total in **minor units (cents)** as integer.
+          - `paymentMethodNonce` maps to @Json("token") — the serialised Adyen
+            PaymentComponentData JSON string (NOT just the stored-method ID).
+
+        **Working flow for stored PayPal (confirmed 2026-04-04):**
+          1. GET /payment-bff/v1/payment-methods/orders → find PayPal entry in
+             `paymentMethods.tokens[]`, note its `token` field (= Adyen stored
+             payment method ID, e.g. "M6ZWC62H3QZKNCQ9").
+          2. POST /cart/v1/cart/{cartId}/checkout with:
+             - `amount`: cart `totalPrice.centAmount` (integer cents, e.g. 2133)
+             - `token`: JSON string of Adyen PaymentComponentData (see example)
+          3. If response has `confirmation_needed: true`, open the `url` from
+             `confirmation_data` in a browser to authorise via PayPal.
+          4. After PayPal redirect, call this endpoint again with the same body
+             — it will return `confirmation_needed: false` and the order ID.
+      required:
+        - amount
+        - token
+      properties:
+        amount:
+          type: integer
+          description: >
+            Cart total in minor units (cents). Use `totalPrice.centAmount`
+            from GET /cart/v3/cart/{cartId}. E.g. €21.33 → 2133.
+          example: 2133
+        token:
+          type: string
+          description: >
+            Serialised Adyen PaymentComponentData JSON string. For a stored
+            PayPal billing agreement the value is a JSON string containing
+            `paymentMethod`, `amount`, `shopperInteraction`,
+            `recurringProcessingModel` and `returnUrl`. See example.
+          example: >-
+            {"paymentMethod":{"type":"paypal","storedPaymentMethodId":"M6ZWC62H3QZKNCQ9"},"amount":{"currency":"EUR","value":2133},"shopperInteraction":"ContAuth","recurringProcessingModel":"Subscription","returnUrl":"http://localhost:9999"}
+
+    # ---- Checkout confirmation response ------------------------------------
+
+    CheckoutCartResponse:
+      type: object
+      description: >
+        Response from POST /cart/v1/cart/{cartId}/checkout.
+        Confirmed field names from a real successful order (2026-04-04).
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Order UUID. Empty string if confirmation is still pending.
+          example: "47948808-f8cc-49c2-a1ea-f95aa706c59a"
+        number:
+          type: string
+          description: Human-readable order number. Empty string if pending.
+          example: "de-ber-x4j3-ic8w"
+        confirmation_needed:
+          type: boolean
+          description: >
+            True if a payment redirect (e.g. PayPal authorisation) is required
+            before the order is confirmed. Call the endpoint again after the
+            user completes the redirect to finalise.
+          example: false
+        confirmation_data:
+          type: string
+          description: >
+            JSON string containing redirect details when confirmation_needed
+            is true. Fields: paymentMethodType, url (redirect URL), method
+            ("GET"), type ("redirect"). Empty string when confirmation_needed
+            is false.
+          example: ""
+        first_order:
+          type: boolean
+          description: True if this is the shopper's first Flink order.
+          example: false
+
+    # ---- Payment methods response ------------------------------------------
+
+    PaymentMethodsResponse:
+      type: object
+      description: >
+        Response from GET /payment-bff/v1/payment-methods/orders.
+        Top-level fields confirmed from live API response (2026-04-04).
+      properties:
+        clientConfig:
+          type: object
+          description: Adyen SDK configuration.
+          properties:
+            clientKey:
+              type: string
+              description: Adyen live client key.
+              example: "live_RGURWER5BBATXIOBAKAIGQULPU35XH2M"
+            sdkConfig:
+              type: string
+              description: >
+                JSON string containing the full Adyen /paymentMethods response
+                (paymentMethods[] and storedPaymentMethods[]). Parse this string
+                to extract available and stored payment methods.
+        paymentMethods:
+          type: object
+          description: Flink-side payment method wrapper.
+          properties:
+            tokens:
+              type: array
+              description: >
+                Saved / tokenized payment methods. The `token` field on each
+                entry is the Adyen stored payment method ID — use this as
+                `storedPaymentMethodId` in the checkout token JSON.
+              items:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    description: Adyen payment method type.
+                    example: "paypal"
+                  name:
+                    type: string
+                    example: "PayPal"
+                  tokenUniqueReference:
+                    type: string
+                    format: uuid
+                    example: "315578c6-0731-4e69-bb87-bb1f3744932d"
+                  token:
+                    type: string
+                    description: >
+                      Adyen stored payment method ID. Use as
+                      `storedPaymentMethodId` in the checkout PaymentComponentData.
+                    example: "M6ZWC62H3QZKNCQ9"
+                  subtitle:
+                    type: string
+                    nullable: true
+                    description: Display subtitle (e.g. PayPal email address).
+                    example: "stefan@sels.com"
+                  brand:
+                    type: string
+                    nullable: true
+                  cardExpiryMonth:
+                    type: string
+                    nullable: true
+                  cardExpiryYear:
+                    type: string
+                    nullable: true
+                  cardLastFourDigits:
+                    type: string
+                    nullable: true
+            available:
+              type: array
+              description: Payment method types enabled for this hub (no stored tokens).
+              items:
+                type: object
+                additionalProperties: true
+            default:
+              type: object
+              nullable: true
+              description: Default payment method reference.
+              additionalProperties: true
+
+    # ---- Sign-up request ---------------------------------------------------
+
+    SignUpRequest:
+      type: object
+      description: >
+        Bootstrap email sign-up. Field names from SignUpService.SignUpRequest.
+        All fields @NotNull. Used internally to obtain a Firebase custom token
+        before an OTP session begins.
+      required:
+        - first_name
+        - last_name
+        - email
+        - password
+      properties:
+        first_name:
+          type: string
+          example: "Bootstrap"
+        last_name:
+          type: string
+          example: "User"
+        email:
+          type: string
+          format: email
+          example: "bootstrap1a2b3c4d5e@mailnull.com"
+        password:
+          type: string
+          format: password
+          example: "B00t1a2b3cX!"
+
+    # ---- Sign-up response --------------------------------------------------
+
+    AccessTokenResponse:
+      type: object
+      description: >
+        Response from POST /sign-up. Field name from
+        SignUpService.AccessTokenDto (@Json "access_token"). This is a Firebase
+        custom token, not a usable ID token — exchange it via Firebase
+        `signInWithCustomToken` to obtain an ID token + refresh token pair.
+      required:
+        - access_token
+      properties:
+        access_token:
+          type: string
+          description: Firebase custom token.
+          example: "eyJhbGciOiJSUzI1NiIsInR5cCI..."
+
+    # ---- Social sign-up request -------------------------------------------
+
+    SocialSignUpRequest:
+      type: object
+      description: >
+        Google OAuth social sign-up. Field names from
+        SignUpService.SocialLoginRequest. All fields @NotNull.
+      required:
+        - first_name
+        - last_name
+        - nonce
+      properties:
+        first_name:
+          type: string
+          example: "Max"
+        last_name:
+          type: string
+          example: "Mustermann"
+        nonce:
+          type: string
+          description: >
+            Google ID token (JWT) for the authenticated Google user.
+          example: "eyJhbGciOiJSUzI1NiIsImtpZCI6..."
+
+    # ---- OTP send request --------------------------------------------------
+
+    SendOtpRequest:
+      type: object
+      description: >
+        Trigger an OTP SMS. Field names observed in auth.py send_otp().
+        camelCase is used here (matching the observed wire payload in auth.py).
+      required:
+        - countryCode
+        - number
+        - channel
+      properties:
+        countryCode:
+          type: string
+          description: ITU country dial code including leading "+".
+          example: "+49"
+        number:
+          type: string
+          description: Phone number without country code.
+          example: "15112345678"
+        channel:
+          type: string
+          description: Delivery channel. Observed value is "sms".
+          enum:
+            - sms
+            - whatsapp
+          example: "sms"
+
+    # ---- OTP verify (ActionDto) -------------------------------------------
+
+    VerifyOtpRequest:
+      type: object
+      description: >
+        OTP verification / phone-link via ActionDto. Observed in auth.py
+        verify_otp(). The outer key "action" wraps a phoneNumber object and
+        a verificationCode. camelCase field names match the observed wire
+        payload.
+
+        **409 behaviour:** if the phone number is already linked to a different
+        Firebase account, the server returns HTTP 409. Retry the identical
+        request with `override: true` inside the action object to force
+        re-linking.
+      required:
+        - action
+      properties:
+        action:
+          type: object
+          required:
+            - phoneNumber
+            - verificationCode
+          properties:
+            phoneNumber:
+              type: object
+              required:
+                - countryCode
+                - number
+              properties:
+                countryCode:
+                  type: string
+                  example: "+49"
+                number:
+                  type: string
+                  example: "15112345678"
+            verificationCode:
+              type: string
+              description: 6-digit OTP from SMS.
+              example: "123456"
+            override:
+              type: boolean
+              description: >
+                Set to true to force re-linking when the phone is already
+                associated with another account (handle 409 → retry with
+                override=true).
+              example: false
+
+    # ---- Hub response (hub-locator) ----------------------------------------
+
+    HubResponse:
+      type: object
+      description: >
+        A single hub entry returned by the hub-locator service. Exact shape
+        inferred from server.py find_hub() response handling.
+      properties:
+        id:
+          type: string
+          example: "1234"
+        slug:
+          type: string
+          example: "berlin-mitte-1"
+        name:
+          type: string
+          example: "Berlin Mitte 1"
+        address:
+          type: object
+          additionalProperties: true
+        coordinates:
+          type: object
+          properties:
+            latitude:
+              type: number
+              format: double
+            longitude:
+              type: number
+              format: double
+        status:
+          type: string
+          description: Hub operational status. Observed value "OPEN".
+          example: "OPEN"
+
+    # ---- Delivery schedule response ----------------------------------------
+
+    DeliveryScheduleResponse:
+      type: object
+      description: >
+        Response from GET /checkout-bff/v1/order-scheduling/delivery-details.
+        Field names from DeliveryScheduleResponseDto.kt. meta and
+        checkout_delivery_options and selected_slot are @Nullable;
+        home_delivery_options and delivery_schedule are @NotNull.
+      properties:
+        meta:
+          type: object
+          nullable: true
+          description: Optional metadata about the delivery schedule.
+          additionalProperties: true
+        home:
+          type: object
+          description: Home delivery options (always present).
+          additionalProperties: true
+        checkout:
+          type: object
+          nullable: true
+          description: Checkout-specific delivery options.
+          additionalProperties: true
+        schedule:
+          type: object
+          description: Full delivery schedule with available time slots.
+          additionalProperties: true
+        selected_slot:
+          $ref: '#/components/schemas/SelectedTimeSlotDto'
+          nullable: true
+
+    # ---- Error response ----------------------------------------------------
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Not Found"
+        message:
+          type: string
+          example: "Cart not found"
+        status:
+          type: integer
+          example: 404
+
+
+# =============================================================================
+# Paths
+# =============================================================================
+
+paths:
+
+  # ---------------------------------------------------------------------------
+  # Auth — email sign-up (bootstrap)
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/users/v1/me/sign-up:
+    post:
+      operationId: signUp
+      summary: Bootstrap email account (no auth required)
+      description: >
+        Creates a new Flink account with an email and password and returns a
+        Firebase custom token. This endpoint requires **no Authorization
+        header** — it is used to bootstrap a Firebase identity before OTP
+        verification.
+
+        The returned `access_token` is a Firebase custom token. Exchange it
+        with the Firebase Identity Toolkit (`signInWithCustomToken`) to obtain
+        a proper Firebase ID token and refresh token before calling any
+        authenticated endpoint.
+
+        The `locale` header is required. `User-Agent` and `Client-Version`
+        should be supplied to avoid bot-detection middleware (DataDome).
+      security: []
+      tags:
+        - auth
+      parameters:
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignUpRequest'
+            example:
+              first_name: "Bootstrap"
+              last_name: "User"
+              email: "bootstrap1a2b3c4d5e@mailnull.com"
+              password: "B00t1a2b3cX!"
+      responses:
+        '200':
+          description: Account created. Returns a Firebase custom token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessTokenResponse'
+        '201':
+          description: Account created (alternate success status).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccessTokenResponse'
+        '400':
+          description: Validation error (missing/invalid fields).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Email address is already registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Auth — Google OAuth / social sign-up
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/users/v1/me/social-sign-up:
+    post:
+      operationId: socialSignUp
+      summary: Google OAuth social sign-up / sign-in
+      description: >
+        Sign up or sign in with Google. Pass the Google ID token as the
+        `nonce` field. Requires a valid Firebase ID token in the Authorization
+        header (obtain one from a bootstrap sign-up first).
+
+        The `locale` header is passed as a query/header parameter. Returns
+        HTTP 200 with no body (Unit) on success — the Firebase token used
+        in the Authorization header becomes the account's token.
+      tags:
+        - auth
+      parameters:
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SocialSignUpRequest'
+            example:
+              first_name: "Max"
+              last_name: "Mustermann"
+              nonce: "eyJhbGciOiJSUzI1NiIsImtpZCI6..."
+      responses:
+        '200':
+          description: Social sign-up/sign-in successful. No response body.
+        '400':
+          description: Invalid Google token or validation error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Auth — send OTP
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/customer-http/v1/send-otp:
+    post:
+      operationId: sendOtp
+      summary: Trigger OTP SMS to a phone number
+      description: >
+        Sends a one-time password via SMS (or WhatsApp) to the given phone
+        number. Requires a valid Firebase ID token — use the bootstrap sign-up
+        flow to obtain one before calling this endpoint.
+
+        Field names are camelCase (not snake_case) as observed in auth.py.
+      tags:
+        - auth
+      parameters:
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendOtpRequest'
+            example:
+              countryCode: "+49"
+              number: "15112345678"
+              channel: "sms"
+      responses:
+        '200':
+          description: OTP sent successfully. No response body.
+        '400':
+          description: Invalid phone number or channel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded. Wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Auth — verify OTP / link phone (ActionDto)
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/customer-http/v1/me:
+    put:
+      operationId: verifyOtpAndLinkPhone
+      summary: Verify OTP code and link phone number to account
+      description: >
+        Verifies the OTP received by SMS and links the verified phone number
+        to the current Firebase account. The bootstrap Firebase ID token
+        remains valid for all subsequent API calls after successful verification.
+
+        **409 conflict:** If the phone number is already linked to a different
+        account, the server returns HTTP 409. Retry with `override: true`
+        inside the `action` object to force re-linking the phone to the current
+        account.
+
+        On success the response body contains the updated customer profile.
+      tags:
+        - auth
+      parameters:
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyOtpRequest'
+            examples:
+              first_attempt:
+                summary: Initial verification attempt
+                value:
+                  action:
+                    phoneNumber:
+                      countryCode: "+49"
+                      number: "15112345678"
+                    verificationCode: "123456"
+              override_conflict:
+                summary: Force re-link after 409 conflict
+                value:
+                  action:
+                    phoneNumber:
+                      countryCode: "+49"
+                      number: "15112345678"
+                    verificationCode: "123456"
+                    override: true
+      responses:
+        '200':
+          description: Phone verified and linked. Returns updated customer profile.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Customer profile (shape not fully documented).
+                additionalProperties: true
+        '400':
+          description: Invalid OTP code or request shape.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: >
+            Phone number already linked to a different account. Retry with
+            `override: true` in the action body.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Hub locator
+  # ---------------------------------------------------------------------------
+
+  /hub-locator/hub-locator/v1/locations/hub:
+    get:
+      operationId: findHub
+      summary: Find nearest hubs for given coordinates
+      description: >
+        Returns the list of Flink hubs serving the supplied lat/long. This
+        endpoint does **not** require authentication. Returns a list of hubs
+        directly or wrapped in a `hubs` / `data` envelope (server.py handles
+        both shapes).
+
+        Note: the path has a double `hub-locator` segment — this is correct.
+      security: []
+      tags:
+        - hubs
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          description: Latitude (WGS-84).
+          schema:
+            type: number
+            format: double
+          example: 52.5089
+        - name: long
+          in: query
+          required: true
+          description: Longitude (WGS-84). Note the parameter name is `long`, not `lon`.
+          schema:
+            type: number
+            format: double
+          example: 13.4523
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      responses:
+        '200':
+          description: List of nearby hubs.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/HubResponse'
+                  - type: object
+                    properties:
+                      hubs:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/HubResponse'
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/HubResponse'
+              example:
+                hubs:
+                  - id: "1234"
+                    slug: "berlin-mitte-1"
+                    name: "Berlin Mitte 1"
+                    status: "OPEN"
+        '400':
+          description: Invalid coordinates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Hub detail
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/hub/v1/hubs/{hubId}:
+    get:
+      operationId: getHub
+      summary: Get details for a specific hub
+      description: Returns full details for a single hub by its numeric ID.
+      tags:
+        - hubs
+      parameters:
+        - name: hubId
+          in: path
+          required: true
+          description: Numeric hub identifier.
+          schema:
+            type: string
+          example: "1234"
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      responses:
+        '200':
+          description: Hub details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HubResponse'
+        '404':
+          description: Hub not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Home screen / product catalog
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/homescreen/v2/home:
+    get:
+      operationId: getHomescreen
+      summary: Fetch home screen product catalog for the active hub
+      description: >
+        Returns the full home screen content for the hub identified by the
+        `hub-slug` header. The response contains product sections, banners,
+        and category data. DiscoveryService.kt confirms this endpoint uses
+        GET with `hub-slug`, `locale` and `Accept` headers.
+      tags:
+        - discovery
+      parameters:
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: Accept
+          in: header
+          required: false
+          schema:
+            type: string
+            default: "application/json"
+      responses:
+        '200':
+          description: Home screen content.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: >
+                  Home screen DTO (HomeDto). Shape not fully documented.
+                additionalProperties: true
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Search
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/discovery/v2/search:
+    get:
+      operationId: searchProducts
+      summary: Search products by query string
+      description: >
+        Full-text search for products at the active hub. SearchService.kt
+        (Zm/i.java) shows this takes `hub-slug`, `locale`, optional
+        `Autocomplete-Query-Id`, `Autocomplete-Position`, required
+        `search-query-origin` headers, and a `query` query parameter.
+      tags:
+        - discovery
+      parameters:
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: query
+          in: query
+          required: true
+          description: Search query string.
+          schema:
+            type: string
+          example: "Milch"
+        - name: Autocomplete-Query-Id
+          in: header
+          required: false
+          description: Algolia autocomplete query ID for analytics attribution.
+          schema:
+            type: string
+            nullable: true
+        - name: Autocomplete-Position
+          in: header
+          required: false
+          description: Position in autocomplete list for analytics attribution.
+          schema:
+            type: string
+            nullable: true
+        - name: search-query-origin
+          in: header
+          required: false
+          description: >
+            Origin of the search query. Observed values: "manual", "autocomplete".
+          schema:
+            type: string
+            default: "manual"
+      responses:
+        '200':
+          description: Search results.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: SearchResponseDto. Shape not fully documented.
+                additionalProperties: true
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Search suggestions (autocomplete)
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/discovery/v1/search/suggestions:
+    get:
+      operationId: getSearchSuggestions
+      summary: Autocomplete / search suggestions
+      description: >
+        Returns autocomplete suggestions for a partial query. SearchService.kt
+        (Zm/i.java) shows this takes `hub-slug`, `locale` headers and a
+        `query` query parameter.
+      tags:
+        - discovery
+      parameters:
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+          example: "Mil"
+      responses:
+        '200':
+          description: Suggestion list.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: SearchSuggestionResponseDto. Shape not fully documented.
+                additionalProperties: true
+
+  # ---------------------------------------------------------------------------
+  # Product stock / quantities by SKU
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/discovery/v1/products/amounts-by-sku:
+    post:
+      operationId: getProductAmountsBySku
+      summary: Check stock quantities for a list of SKUs
+      description: >
+        Returns available quantities for the supplied SKUs at the active hub.
+        ProductService.kt (Gf/u.java) confirms POST with `hub`, `hub-slug`,
+        `locale` headers and a body containing a list of SKUs.
+        The request body field name observed in server.py is `skus`.
+      tags:
+        - discovery
+      parameters:
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - skus
+              properties:
+                skus:
+                  type: array
+                  items:
+                    type: string
+                  description: List of product SKUs to query.
+                  example:
+                    - "prod-de-0012345"
+                    - "prod-de-0067890"
+      responses:
+        '200':
+          description: Array of available quantities per SKU.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  description: AvailableQuantitiesDto. Shape not fully documented.
+                  additionalProperties: true
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Products by SKU (full product details)
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/discovery/v3/products:
+    post:
+      operationId: getProductsBySku
+      summary: Fetch full product details for a list of SKUs
+      description: >
+        Returns rich product data (name, price, images, etc.) for the supplied
+        SKUs. ProductService.kt (Gf/u.java) uses POST with `hub-slug`,
+        `locale`, `flink-product-images` headers and a body of type
+        GetProductsBySkuBody.
+      tags:
+        - discovery
+      parameters:
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: flink-product-images
+          in: header
+          required: false
+          description: >
+            Image quality/size hint. Observed value: "webp". Pass empty string
+            to omit image optimisation.
+          schema:
+            type: string
+            default: "webp"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: GetProductsBySkuBody. Shape inferred from service definition.
+              properties:
+                skus:
+                  type: array
+                  items:
+                    type: string
+                  example:
+                    - "prod-de-0012345"
+      responses:
+        '200':
+          description: Product details.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: GetProductsBySkuResponse. Shape not fully documented.
+                additionalProperties: true
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Search recommendations
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/discovery/v1/search/recommendations:
+    get:
+      operationId: getSearchRecommendations
+      summary: Personalised search recommendations
+      description: >
+        Returns personalised product recommendations for the home/search
+        screen. DiscoveryService.kt (Gf/InterfaceC6568j.java) uses GET with
+        `hub-slug`, `locale`, `flink-product-images` headers.
+      tags:
+        - discovery
+      parameters:
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: flink-product-images
+          in: header
+          required: false
+          schema:
+            type: string
+            default: "webp"
+      responses:
+        '200':
+          description: Product recommendations.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: ProductRecommendationsResponseDto. Shape not fully documented.
+                additionalProperties: true
+
+  # ---------------------------------------------------------------------------
+  # Cart recommendations
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/discovery/v1/cart/recommendations:
+    post:
+      operationId: getCartRecommendations
+      summary: Cart-based product recommendations
+      description: >
+        Returns product recommendations based on current cart contents.
+        DiscoveryService.kt uses POST with `hub-slug`, `locale`,
+        `flink-product-images` headers and a CartRecommendationsRequestDto body.
+      tags:
+        - discovery
+      parameters:
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: flink-product-images
+          in: header
+          required: false
+          schema:
+            type: string
+            default: "webp"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: CartRecommendationsRequestDto. Shape not fully documented.
+              additionalProperties: true
+      responses:
+        '200':
+          description: Cart-based recommendations.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  # ---------------------------------------------------------------------------
+  # Cart — create
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/cart/v3/cart:
+    post:
+      operationId: createCart
+      summary: Create a new cart
+      description: >
+        Creates a new cart with the supplied items, addresses and delivery
+        coordinates. Returns a simplified cart object containing the cart ID
+        for subsequent operations.
+
+        RemoteCartService.kt (Jf/InterfaceC7745h.java) requires `hub`,
+        `hub-slug`, `locale` and `flink-capability` headers in addition to
+        Authorization.
+      tags:
+        - cart
+      parameters:
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: flink-capability
+          in: header
+          required: false
+          description: >
+            Feature capability flags for the cart. Observed value: "v3".
+            Pass empty string if unknown.
+          schema:
+            type: string
+            default: "v3"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCartRequest'
+            example:
+              shipping_address:
+                tag: "home"
+                city: "Berlin"
+                country: "DE"
+                first_name: "Max"
+                last_name: "Mustermann"
+                phone: "+4915112345678"
+                postal_code: "10115"
+                street_address_1: "Unter den Linden"
+                house_number: "1"
+                floor_number: ""
+                name_on_doorbell: "Mustermann"
+                building_type: ""
+                building_location: ""
+              billing_address:
+                tag: "home"
+                city: "Berlin"
+                country: "DE"
+                first_name: "Max"
+                last_name: "Mustermann"
+                phone: "+4915112345678"
+                postal_code: "10115"
+                street_address_1: "Unter den Linden"
+                house_number: "1"
+                floor_number: ""
+                name_on_doorbell: "Mustermann"
+                building_type: ""
+                building_location: ""
+              delivery_coordinates:
+                latitude: 52.5089
+                longitude: 13.4523
+              lines:
+                - product_sku: "prod-de-0012345"
+                  quantity: 2
+      responses:
+        '200':
+          description: Cart created. Returns simplified cart with ID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimplifiedCartResponse'
+        '201':
+          description: Cart created (alternate success status).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimplifiedCartResponse'
+        '400':
+          description: Validation error (bad address, invalid SKU, etc.).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: >
+            Unprocessable — e.g. item out of stock or hub cannot deliver
+            to the supplied coordinates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Cart — get / update
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/cart/v3/cart/{cartId}:
+    get:
+      operationId: getCart
+      summary: Retrieve cart by ID
+      description: >
+        Returns the full cart including lines, addresses, pricing and status.
+        RemoteCartService.kt confirms GET with `hub`, `hub-slug`, `locale`
+        headers and a `{cartId}` path parameter.
+      tags:
+        - cart
+      parameters:
+        - $ref: '#/components/parameters/CartIdPath'
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      responses:
+        '200':
+          description: Full cart object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Cart not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      operationId: updateCart
+      summary: Update cart lines and/or delivery details
+      description: >
+        Replaces cart contents with the supplied lines and coordinates.
+        RemoteCartService.kt uses PUT with `hub`, `hub-slug`, `locale`,
+        `source` headers and a `{cartId}` path parameter.
+
+        To add/update an item: fetch the current cart, merge your item into
+        the existing lines array, then PUT the full merged list back.
+        To remove an item: omit it from the lines array.
+
+        Set `promised_delivery_time` to 0 to use the hub's default.
+      tags:
+        - cart
+      parameters:
+        - $ref: '#/components/parameters/CartIdPath'
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: source
+          in: header
+          required: false
+          description: >
+            Client source identifier for analytics. Observed value: "app".
+          schema:
+            type: string
+            default: "app"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCartRequest'
+            example:
+              delivery_coordinates:
+                latitude: 52.5089
+                longitude: 13.4523
+              lines:
+                - product_sku: "prod-de-0012345"
+                  quantity: 3
+                - product_sku: "prod-de-0067890"
+                  quantity: 1
+              promised_delivery_time: 0
+      responses:
+        '200':
+          description: Updated full cart object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+        '400':
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Cart not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Cart — prepare-cart
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/cart/v3/cart/{cartId}/prepare-cart:
+    put:
+      operationId: prepareCart
+      summary: Prepare cart for checkout
+      description: >
+        Locks and validates the cart prior to checkout. Returns a
+        PrepareCartResponseDto. RemoteCartService.kt uses PUT with `hub`,
+        `hub-slug`, `locale`, `retry` (int) headers. A `PrepareCartRequestDto`
+        body is required (shape not fully documented from available sources).
+      tags:
+        - cart
+      parameters:
+        - $ref: '#/components/parameters/CartIdPath'
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: retry
+          in: header
+          required: false
+          description: Retry count for idempotent retries. Pass 0 on first attempt.
+          schema:
+            type: integer
+            default: 0
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: >
+                PrepareCartRequestDto. Exact shape not fully documented from
+                available decompiled sources. Pass an empty object `{}` if
+                no overrides are needed.
+              additionalProperties: true
+            example: {}
+      responses:
+        '200':
+          description: Cart prepared successfully. Returns PrepareCartResponseDto.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: PrepareCartResponseDto. Shape not fully documented.
+                additionalProperties: true
+        '400':
+          description: Cart cannot be prepared (e.g. item out of stock).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Cart not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Cart — add promo code
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/cart/v3/cart/{cartId}/add-promo-code:
+    post:
+      operationId: addPromoCode
+      summary: Apply a promo or voucher code to a cart
+      description: >
+        Applies a discount or promotional code to an existing cart.
+        Observed in server.py add_promo_code(). The request body field name
+        is `voucher_code`.
+      tags:
+        - cart
+      parameters:
+        - $ref: '#/components/parameters/CartIdPath'
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - voucher_code
+              properties:
+                voucher_code:
+                  type: string
+                  example: "WELCOME10"
+      responses:
+        '200':
+          description: Promo code applied. Returns updated cart.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+        '400':
+          description: Invalid or expired promo code.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Cart not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Cart — update rider tip
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/cart/v3/cart/{cartId}/rider-tip:
+    put:
+      operationId: updateRiderTip
+      summary: Update rider tip for a cart
+      description: >
+        Sets or updates the rider tip amount on an existing cart.
+        RemoteCartService.kt uses PUT with a `{cartId}` path parameter and
+        an UpdateRiderTipRequestDto body (shape not fully documented).
+      tags:
+        - cart
+      parameters:
+        - $ref: '#/components/parameters/CartIdPath'
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: UpdateRiderTipRequestDto. Shape not fully documented.
+              additionalProperties: true
+            example:
+              tip_amount: 100
+      responses:
+        '200':
+          description: Rider tip updated. Returns updated cart.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CartResponse'
+        '404':
+          description: Cart not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Cart — update delivery information
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/cart/v3/cart/{cartId}/delivery-information:
+    put:
+      operationId: updateDeliveryInformation
+      summary: Update delivery information for a cart
+      description: >
+        Updates delivery instructions / information for an existing cart.
+        RemoteCartService.kt uses PUT with `hub`, `hub-slug`, `locale`
+        headers and an UpdateDeliveryInfoRequestDto body (shape not fully
+        documented).
+      tags:
+        - cart
+      parameters:
+        - $ref: '#/components/parameters/CartIdPath'
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: UpdateDeliveryInfoRequestDto. Shape not fully documented.
+              additionalProperties: true
+      responses:
+        '200':
+          description: Delivery information updated.
+        '404':
+          description: Cart not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Checkout — submit order
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/cart/v1/cart/{cartId}/checkout:
+    post:
+      operationId: checkoutCart
+      summary: Submit cart as an order (place order)
+      description: >
+        Submits the prepared cart as a real order using the supplied payment
+        token. CheckoutService.kt (Pf/k.java) uses POST with `hub`,
+        `hub-slug`, `locale` headers and a CheckoutCartRequestDto body.
+
+        **Working payment flow (confirmed 2026-04-04):** Use a stored PayPal
+        billing agreement from GET /payment-bff/v1/payment-methods/orders.
+        The `token` field is a serialised Adyen PaymentComponentData JSON string
+        (see CheckoutCartRequest schema). If the response has
+        `confirmation_needed: true`, open the redirect URL in a browser to
+        authorise via PayPal, then call this endpoint again — it returns the
+        order ID on the second call. Coordinates in the cart must be precise
+        (right-click → Google Maps) — the rider navigates to GPS coordinates,
+        not the street address.
+      tags:
+        - checkout
+      parameters:
+        - $ref: '#/components/parameters/CartIdPath'
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckoutCartRequest'
+            example:
+              amount: 2133
+              token: '{"paymentMethod":{"type":"paypal","storedPaymentMethodId":"M6ZWC62H3QZKNCQ9"},"amount":{"currency":"EUR","value":2133},"shopperInteraction":"ContAuth","recurringProcessingModel":"Subscription","returnUrl":"http://localhost:9999"}'
+      responses:
+        '200':
+          description: >
+            Order placed or payment redirect required. Check confirmation_needed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutCartResponse'
+        '400':
+          description: Payment failed or cart is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Cart not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Cart not prepared or item out of stock.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Checkout — order details
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/cart/v1/cart/{cartId}/checkout/details:
+    post:
+      operationId: getCheckoutDetails
+      summary: Fetch checkout details (order summary before payment)
+      description: >
+        Returns the order summary for the cart including final pricing and
+        line items, for display on the checkout confirmation screen.
+        CheckoutService.kt uses POST with `hub`, `hub-slug`, `locale` headers
+        and a CheckoutCartRequestDto body (same shape as the checkout endpoint).
+      tags:
+        - checkout
+      parameters:
+        - $ref: '#/components/parameters/CartIdPath'
+        - $ref: '#/components/parameters/HubHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckoutCartRequest'
+            example:
+              amount: 18.45
+              token: "fake-valid-nonce"
+      responses:
+        '200':
+          description: Checkout details / order summary.
+          content:
+            application/json:
+              schema:
+                type: object
+                description: SimplifiedOrderDetailDto. Shape not fully documented.
+                additionalProperties: true
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Cart not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Payment methods
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/payment-bff/v1/payment-methods/orders:
+    get:
+      operationId: getPaymentMethods
+      summary: Get available and saved payment methods for orders
+      description: >
+        Returns the Adyen SDK configuration and Flink-side saved payment
+        methods for the active hub. PaymentsService.kt (hm/g.java) confirms
+        GET with `locale` and `hub-slug` headers.
+
+        **Response structure:**
+          - `clientConfig.clientKey`: Adyen live public key.
+          - `clientConfig.sdkConfig`: JSON string — parse it to get Adyen's
+            `paymentMethods[]` (available types) and `storedPaymentMethods[]`
+            (saved methods with Adyen IDs and ContAuth support flags).
+          - `paymentMethods.tokens[]`: Flink-side stored methods. Each entry's
+            `token` field equals the Adyen `storedPaymentMethods[].id` —
+            use it as `storedPaymentMethodId` in the checkout token JSON.
+
+        **Confirmed live (2026-04-04):** PayPal billing agreements appear in
+        `paymentMethods.tokens[]` with `type: "paypal"` after the user
+        completes one PayPal payment in the app.
+      tags:
+        - payments
+      parameters:
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+      responses:
+        '200':
+          description: Payment methods and Adyen SDK configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentMethodsResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ---------------------------------------------------------------------------
+  # Checkout — delivery schedule
+  # ---------------------------------------------------------------------------
+
+  /consumer-backend/checkout-bff/v1/order-scheduling/delivery-details:
+    get:
+      operationId: getDeliverySchedule
+      summary: Fetch delivery schedule and available time slots
+      description: >
+        Returns available delivery time slots and scheduling information for
+        the checkout screen. CheckoutService.kt (Pf/k.java) uses GET with
+        `locale`, `user-id` (nullable), `hub-slug`, `delivery-tier-id`
+        (nullable) headers, and `token`, `lat`, `long`, `cart_id` (all
+        nullable except lat/long) query parameters.
+      tags:
+        - checkout
+      parameters:
+        - $ref: '#/components/parameters/HubSlugHeader'
+        - $ref: '#/components/parameters/LocaleHeader'
+        - $ref: '#/components/parameters/UserAgentHeader'
+        - $ref: '#/components/parameters/ClientVersionHeader'
+        - name: user-id
+          in: header
+          required: false
+          description: Firebase UID of the authenticated user. Nullable.
+          schema:
+            type: string
+            nullable: true
+        - name: delivery-tier-id
+          in: header
+          required: false
+          description: Delivery tier identifier for priority/scheduled tiers. Nullable.
+          schema:
+            type: string
+            nullable: true
+        - name: lat
+          in: query
+          required: true
+          description: Delivery latitude (WGS-84).
+          schema:
+            type: string
+          example: "52.5089"
+        - name: long
+          in: query
+          required: true
+          description: Delivery longitude (WGS-84).
+          schema:
+            type: string
+          example: "13.4523"
+        - name: token
+          in: query
+          required: false
+          description: Optional payment method token.
+          schema:
+            type: string
+            nullable: true
+        - name: cart_id
+          in: query
+          required: false
+          description: Cart UUID to scope the delivery schedule.
+          schema:
+            type: string
+            format: uuid
+            nullable: true
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        '200':
+          description: Delivery schedule with available time slots.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryScheduleResponse'
+        '401':
+          description: Missing or expired Firebase ID token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+# ---------------------------------------------------------------------------
+# Tags
+# ---------------------------------------------------------------------------
+
+tags:
+  - name: auth
+    description: >
+      Authentication flows: email bootstrap sign-up, Google OAuth social
+      sign-up, OTP SMS triggering and OTP verification / phone linking.
+  - name: hubs
+    description: Hub discovery and detail endpoints.
+  - name: discovery
+    description: >
+      Product catalog, home screen, search and recommendations.
+      All endpoints require hub headers except where noted.
+  - name: cart
+    description: >
+      Cart lifecycle: create, retrieve, update lines, prepare for checkout,
+      apply promo codes.
+  - name: payments
+    description: >
+      Payment method discovery. Returns saved Adyen tokens (PayPal billing
+      agreements, stored cards) usable for headless checkout.
+  - name: checkout
+    description: >
+      Checkout: order submission (confirmed working with stored PayPal via
+      Adyen PaymentComponentData token), order summary details, delivery scheduling.
