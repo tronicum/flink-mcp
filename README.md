@@ -147,12 +147,26 @@ See [Token 3](#3-adyen-stored-payment-token-paypal--card) above. Complete one or
 ## Running
 
 ```bash
-# Development (with MCP inspector)
+# Development (with MCP Inspector)
 fastmcp dev server.py
 
 # Production / Claude Desktop
 fastmcp install server.py --name flink
 ```
+
+## Debugging with MCP Inspector
+
+`fastmcp dev server.py` starts the server and opens the **MCP Inspector** in your browser — a web UI that lets you call individual tools directly and inspect request/response payloads without going through Claude.
+
+This is the recommended way to debug and explore the API:
+
+1. Call `find_hub(lat=..., lon=...)` → inspect the JSON response → pick a hub
+2. Call `set_active_hub(hub_id, hub_slug)` → call `search_products(query="Milch")` → find SKUs
+3. Call `create_cart(...)` with your items and address → review the cart response
+4. Call `get_payment_methods()` → find your PayPal token
+5. Call `place_order(cart_id, stored_payment_id=..., payment_type="paypal")` → follow the PayPal redirect
+
+Each tool call shows the full response immediately. API errors (wrong field names, missing parameters, auth failures) appear in the response body and are easy to iterate on. Most of the payment flow debugging for this project was done through the Inspector rather than through a Claude conversation.
 
 ## Order flow
 
